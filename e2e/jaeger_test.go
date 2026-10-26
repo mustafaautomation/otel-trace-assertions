@@ -28,25 +28,49 @@ import (
 	"github.com/mustafaautomation/otel-trace-assertions/internal/telemetry"
 )
 
-type jaegerTrace struct {
-	Data []struct {
-		Spans []struct {
-			SpanID        string `json:"spanID"`
-			OperationName string `json:"operationName"`
-			ProcessID     string `json:"processID"`
-			References    []struct {
-				RefType string `json:"refType"`
-				SpanID  string `json:"spanID"`
-			} `json:"references"`
-			Tags []struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
-			} `json:"tags"`
-		} `json:"spans"`
-		Processes map[string]struct {
-			ServiceName string `json:"serviceName"`
-		} `json:"processes"`
-	} `json:"data"`
+// otlpTrace is the part of Jaeger's api_v3 response we read. api_v3 is Jaeger's stable query API
+// and returns the trace as OTLP JSON (resourceSpans -> scopeSpans -> spans). The older /api/traces
+// endpoint is an undocumented UI API and is no longer served by Jaeger 2.22.
+type otlpTrace struct {
+	Result struct {
+		ResourceSpans []struct {
+			Resource struct {
+				Attributes []struct {
+					Key   string `json:"key"`
+					Value struct {
+						StringValue string `json:"stringValue"`
+					} `json:"value"`
+				} `json:"attributes"`
+			} `json:"resource"`
+			ScopeSpans []struct {
+				Spans []struct {
+					SpanID       string `json:"spanId"`
+					ParentSpanID string `json:"parentSpanId"`
+					Name         string `json:"name"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	} `json:"result"`
+}
+
+type flatSpan struct{ id, parent, name, service string }
+
+func (o otlpTrace) spans() []flatSpan {
+	var out []flatSpan
+	for _, rs := range o.Result.ResourceSpans {
+		svc := ""
+		for _, a := range rs.Resource.Attributes {
+			if a.Key == "service.name" {
+				svc = a.Value.StringValue
+			}
+		}
+		for _, ss := range rs.ScopeSpans {
+			for _, sp := range ss.Spans {
+				out = append(out, flatSpan{sp.SpanID, sp.ParentSpanID, sp.Name, svc})
+			}
+		}
+	}
+	return out
 }
 
 func provider(t *testing.T, service string) *sdktrace.TracerProvider {
@@ -95,7 +119,7 @@ func TestTraceArrivesInJaegerAcrossServices(t *testing.T) {
 	}
 
 	// Jaeger indexes asynchronously; poll until all three services have arrived.
-	var got jaegerTrace
+	var got []flatSpan
 	services := map[string]bool{}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -109,17 +133,14 @@ func TestTraceArrivesInJaegerAcrossServices(t *testing.T) {
 		t.Fatalf("trace %s in Jaeger has services %v, want e2e-client, checkout and payment", traceID, services)
 	}
 
-	tr := got.Data[0]
 	byOp := map[string]string{}   // operation -> spanID
 	parent := map[string]string{} // spanID -> parent spanID
 	service := map[string]string{}
-	for _, s := range tr.Spans {
-		byOp[s.OperationName] = s.SpanID
-		service[s.SpanID] = tr.Processes[s.ProcessID].ServiceName
-		for _, r := range s.References {
-			if r.RefType == "CHILD_OF" {
-				parent[s.SpanID] = r.SpanID
-			}
+	for _, s := range got {
+		byOp[s.name] = s.id
+		service[s.id] = s.service
+		if s.parent != "" {
+			parent[s.id] = s.parent
 		}
 	}
 	for _, op := range []string{"place order", "POST /checkout", "validate order", "check stock", "SELECT inventory", "charge payment", "POST /charge"} {
@@ -140,22 +161,23 @@ func TestTraceArrivesInJaegerAcrossServices(t *testing.T) {
 	}
 }
 
-func fetch(t *testing.T, base, traceID string) (jaegerTrace, map[string]bool) {
+func fetch(t *testing.T, base, traceID string) ([]flatSpan, map[string]bool) {
 	t.Helper()
-	var out jaegerTrace
-	resp, err := http.Get(fmt.Sprintf("%s/api/traces/%s", base, traceID))
+	resp, err := http.Get(fmt.Sprintf("%s/api/v3/traces/%s", base, traceID))
 	if err != nil {
-		return out, nil
+		return nil, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil || len(out.Data) == 0 {
-		return out, nil
+	var out otlpTrace
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil, nil
 	}
+	spans := out.spans()
 	services := map[string]bool{}
-	for _, s := range out.Data[0].Spans {
-		services[out.Data[0].Processes[s.ProcessID].ServiceName] = true
+	for _, s := range spans {
+		services[s.service] = true
 	}
-	return out, services
+	return spans, services
 }
 
 func keys(m map[string]string) []string {

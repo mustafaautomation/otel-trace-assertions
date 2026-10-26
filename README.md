@@ -60,7 +60,7 @@ themselves, which is the kind of gap these tests are for.
 ## End-to-end against Jaeger
 
 `e2e/jaeger_test.go` (build tag `e2e`) exports real spans over OTLP/HTTP to Jaeger 2.22, then reads
-the stored trace back from Jaeger's query API. It checks that:
+the stored trace back from Jaeger's stable api_v3 query endpoint (`/api/v3/traces/{id}`, OTLP JSON). It checks that:
 
 - all three services (the test client, checkout and payment) are in one trace;
 - every expected operation was stored;

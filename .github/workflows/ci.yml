@@ -53,7 +53,7 @@ jobs:
           go-version-file: go.mod
       - name: Wait for Jaeger
         run: |
-          for i in $(seq 1 30); do curl -fsS http://localhost:16686/api/services >/dev/null && exit 0; sleep 2; done
+          for i in $(seq 1 30); do curl -fsS http://localhost:16686/api/v3/services >/dev/null && exit 0; sleep 2; done
           echo "Jaeger did not come up"; exit 1
       - run: go test -tags e2e -count=1 -v ./e2e/
         env:
