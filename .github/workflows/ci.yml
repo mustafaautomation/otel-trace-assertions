@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --build-tags e2e
+
+  test:
+    name: Trace assertions (in-memory, race detector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 -coverpkg=./internal/checkout/,./internal/payment/,./internal/store/,./traceassert/ -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out | tail -1
+      - name: Repeat the trace tests to catch flakiness
+        run: go test -count=10 ./internal/checkout/
+
+  e2e:
+    name: OTLP export to Jaeger, assert on the stored trace
+    runs-on: ubuntu-latest
+    services:
+      jaeger:
+        image: jaegertracing/jaeger:2.22.0
+        ports:
+          - 4318:4318
+          - 16686:16686
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Wait for Jaeger
+        run: |
+          for i in $(seq 1 30); do curl -fsS http://localhost:16686/api/services >/dev/null && exit 0; sleep 2; done
+          echo "Jaeger did not come up"; exit 1
+      - run: go test -tags e2e -count=1 -v ./e2e/
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+          JAEGER_QUERY_URL: http://localhost:16686
